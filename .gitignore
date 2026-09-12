@@ -1,0 +1,35 @@
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Node (leftover local files — not part of this Python demo)
+node_modules/
+package.json
+package-lock.json
+
+# Jupyter (not used in current setup)
+*.ipynb
+.jupyter/
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# Sample docs
+*.pdf
+
+# Claude Code
+.claude/*
+scripts/*
+BetterDB.md
