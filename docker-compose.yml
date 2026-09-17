@@ -5,7 +5,8 @@ services:
     image: valkey/valkey:8.1-alpine
     container_name: betterdb-demo-valkey
     ports:
-      - "6379:6379"
+      # Override with VALKEY_HOST_PORT=6380 in .env if 6379 is already in use
+      - "${VALKEY_HOST_PORT:-6379}:6379"
     command: >
       valkey-server
       --slowlog-log-slower-than 100
@@ -28,7 +29,11 @@ volumes:
 #   docker-compose logs valkey  → logs
 #   docker-compose down         → stop + clean
 #
-# After Valkey is up, run BetterDB self-hosted:
-#   npx @betterdb/monitor
-#   → interactive wizard, connect to localhost:6379
-#   → dashboard at http://localhost:3001
+# After Valkey is up:
+#   Local Monitor (no Cloud):
+#     docker run -d --name betterdb-monitor --network <compose_network> \
+#       -p 3001:3001 -e DB_HOST=betterdb-demo-valkey -e DB_PORT=6379 \
+#       -e STORAGE_TYPE=memory betterdb/monitor:latest
+#     → http://localhost:3001
+#   Cloud: Add Connection → Via Agent, then docker run betterdb/agent
+#     (VALKEY_PORT on the agent = the host port, default 6379)

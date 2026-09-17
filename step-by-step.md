@@ -16,14 +16,16 @@ User Query → FastAPI (/query) → Rate Limit Check    rag:doc:{sha256}
                               → Cache Store
                               → Session Write
                                    ↓
-                     BetterDB Agent (Docker) → BetterDB Cloud Dashboard
+                     BetterDB Monitor (Docker, localhost:3001)
+                                   and/or
+                     BetterDB Agent (Docker) → BetterDB Cloud
 ```
 
 ### Redis options
 
 | | Upstash (cloud) | Local Valkey (Docker) |
 |---|---|---|
-| `REDIS_URL` | `rediss://default:TOKEN@your-db.upstash.io:6379` | `redis://localhost:6379` |
+| `REDIS_URL` | `rediss://default:TOKEN@your-db.upstash.io:6379` | `redis://localhost:6379` (or `:6380` if `VALKEY_HOST_PORT=6380`) |
 | TLS | Required (`rediss://`) | None (`redis://`) |
 | HGETALL latency | ~264ms (network RTT) | ~0.1ms (loopback) |
 | Full scan (21 keys) | ~6000ms | ~5ms |
@@ -38,10 +40,10 @@ User Query → FastAPI (/query) → Rate Limit Check    rag:doc:{sha256}
 | Tool | Version | Status |
 |---|---|---|
 | Python | 3.12+ | Required |
-| Docker | any | Required (BetterDB agent) |
+| Docker | any | Required (Valkey + Monitor or agent) |
 | OpenAI API Key | — | Required |
-| Upstash Redis | free tier | Required |
-| BetterDB Cloud | free | Required |
+| Upstash Redis | free tier | Optional (or use local Valkey) |
+| BetterDB | Cloud and/or local Monitor | Required for observability |
 
 ---
 
@@ -57,20 +59,21 @@ uv pip install fastapi uvicorn pypdf numpy pydantic-settings python-multipart op
 ### 1.2 Configure .env
 
 ```dotenv
-# BetterDB
+# BetterDB — not read by rag/. Used by Cloud, the agent, and MCP.
 BETTERDB_URL=https://<your-workspace>.app.betterdb.com
-BETTERDB_TOKEN=<your_betterdb_token>
+BETTERDB_CLOUD_URL=wss://<your-workspace>.app.betterdb.com/agent/ws
+BETTERDB_TOKEN=<mcp_token_from_settings>          # Settings → MCP Tokens
+BETTERDB_AGENT_TOKEN=<agent_token_from_connection> # Add Connection → Via Agent
 
 # OpenAI
 OPENAI_API_KEY=sk-...
 
 # ── OPTION A: Upstash Redis (cloud, zero infra) ───────────────────────────────
-# TCP URL with TLS — note double-s in rediss://
-# Get password: Upstash Dashboard → your DB → TCP tab → uncheck "Read-Only Token" → copy
 REDIS_URL=rediss://default:<your_upstash_token>@your-db.upstash.io:6379
 
 # ── OPTION B: Local Valkey (Docker, better for Feature 5 slowlog demo) ────────
 # REDIS_URL=redis://localhost:6379
+# If 6379 is taken: VALKEY_HOST_PORT=6380 and REDIS_URL=redis://localhost:6380
 ```
 
 ### 1.3 Start Redis
@@ -79,15 +82,56 @@ REDIS_URL=rediss://default:<your_upstash_token>@your-db.upstash.io:6379
 
 **Option B — Local Valkey:**
 ```bash
-docker-compose up -d
-docker-compose ps    # wait for "healthy"
+docker compose up -d
+docker compose ps    # wait for "healthy"
 ```
 
-### 1.4 Connect Redis to BetterDB cloud
+If 6379 is busy, set `VALKEY_HOST_PORT=6380` in `.env` first. `REDIS_URL` must use that same host port.
 
-BetterDB cloud → Manage Connections → **+ Add Connection** → **Via Agent** tab → create token.
+### 1.4 Observe with BetterDB
 
-**Option A — Upstash (Direct Connection tab):**
+**Local Monitor (no Cloud):**
+
+```bash
+docker run -d --name betterdb-monitor \
+  --network <compose_project>_default \
+  -p 3001:3001 \
+  -e DB_HOST=betterdb-demo-valkey \
+  -e DB_PORT=6379 \
+  -e STORAGE_TYPE=memory \
+  betterdb/monitor:latest
+```
+
+Dashboard: http://localhost:3001  
+Inside the Compose network, Valkey is always `betterdb-demo-valkey:6379`.
+
+**Cloud (Via Agent) — required for a local Valkey that is not public:**
+
+1. Sign in at `https://<your-workspace>.app.betterdb.com` (fresh login; do not reuse old `/api/auth/callback?token=...` links).
+2. Add Connection → **Via Agent** → generate token → `BETTERDB_AGENT_TOKEN`.
+3. Run (set `VALKEY_PORT` to the **host** port from `REDIS_URL`):
+
+```bash
+docker run -d \
+  --name betterdb-agent-local \
+  -e VALKEY_HOST=host.docker.internal \
+  -e VALKEY_PORT=6379 \
+  -e BETTERDB_CLOUD_URL=wss://<your-workspace>.app.betterdb.com/agent/ws \
+  -e BETTERDB_TOKEN=<BETTERDB_AGENT_TOKEN> \
+  betterdb/agent:1.4.0
+```
+
+> `host.docker.internal` — lets the Docker container reach your Mac's published Valkey port.
+> On Linux replace with `172.17.0.1`.
+
+Verify agent connected:
+```bash
+docker logs betterdb-agent-local
+# Expected: [Agent] WebSocket connected, sending hello
+```
+
+**Upstash (Direct Connection)** is also supported in Cloud if Redis is public + TLS. Agent example:
+
 ```bash
 docker run -d \
   --name betterdb-agent \
@@ -97,38 +141,17 @@ docker run -d \
   -e VALKEY_USERNAME=default \
   -e VALKEY_PASSWORD=<your_upstash_write_token> \
   -e BETTERDB_CLOUD_URL=wss://<your-workspace>.app.betterdb.com/agent/ws \
-  -e BETTERDB_TOKEN=<betterdb_agent_token> \
-  betterdb/agent:latest
+  -e BETTERDB_TOKEN=<BETTERDB_AGENT_TOKEN> \
+  betterdb/agent:1.4.0
 ```
 
-**Option B — Local Valkey:**
-```bash
-docker run -d \
-  --name betterdb-agent-local \
-  -e VALKEY_HOST=host.docker.internal \
-  -e VALKEY_PORT=6379 \
-  -e BETTERDB_CLOUD_URL=wss://<your-workspace>.app.betterdb.com/agent/ws \
-  -e BETTERDB_TOKEN=<betterdb_agent_token> \
-  betterdb/agent:latest
-```
-
-> `host.docker.internal` — lets the Docker container reach your Mac's `localhost:6379`.
-> On Linux replace with `172.17.0.1`.
-
-Verify agent connected:
-```bash
-docker logs betterdb-agent        # Upstash
-docker logs betterdb-agent-local  # Local Valkey
-# Expected: [Agent] WebSocket connected, sending hello
-```
-
-### 1.4 Start FastAPI server
+### 1.5 Start FastAPI server
 
 ```bash
 uvicorn rag.main:app --reload --port 8000
 ```
 
-### 1.5 Health check
+### 1.6 Health check
 
 ```bash
 curl http://localhost:8000/health
@@ -171,7 +194,40 @@ curl http://localhost:8000/stats
 
 ### Setup MCP in Claude Code
 
-`~/.claude/claude_desktop_config.json`:
+Two different BetterDB tokens exist. Do not mix them:
+
+| Token | Where you create it | Where you put it |
+|---|---|---|
+| **Agent** | Add Connection → Via Agent | `docker run … -e BETTERDB_TOKEN=… betterdb/agent` |
+| **MCP** | Settings → MCP Tokens | Claude / Cursor MCP `env.BETTERDB_TOKEN` |
+
+**Local Monitor already running on :3001** (no MCP token):
+
+```json
+{
+  "mcpServers": {
+    "betterdb": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@betterdb/mcp"],
+      "env": {
+        "BETTERDB_URL": "http://localhost:3001"
+      }
+    }
+  }
+}
+```
+
+This repo also ships `.mcp.json` with that local config.
+
+**Zero-config** (MCP starts its own Monitor):
+
+```bash
+claude mcp add betterdb -- npx @betterdb/mcp betterdb-mcp --autostart --persist
+```
+
+**Cloud:**
+
 ```json
 {
   "mcpServers": {
@@ -181,7 +237,7 @@ curl http://localhost:8000/stats
       "args": ["-y", "@betterdb/mcp"],
       "env": {
         "BETTERDB_URL": "https://<your-workspace>.app.betterdb.com",
-        "BETTERDB_TOKEN": "<your_token>"
+        "BETTERDB_TOKEN": "<mcp_token>"
       }
     }
   }
@@ -199,7 +255,7 @@ curl http://localhost:8000/stats
 "Show me the complete incident timeline"
 ```
 
-Each question maps to a BetterDB MCP tool call that returns real data from your Upstash instance.
+Each question maps to a BetterDB MCP tool call against local Monitor or Cloud.
 
 ---
 
@@ -662,8 +718,10 @@ Ask these directly in Claude Code terminal after connecting BetterDB MCP:
 | `slowlog` returns empty | Upstash restricts SLOWLOG | Switch to local Valkey OR measure latency directly |
 | `cache_similarity_distribution` fails | BetterDB JS SDK not used | Python only — use standard monitoring tools |
 | Slow queries (~6s) | HGETALL RTT to Upstash us-east-1 | Switch to local Valkey (see Section 12) |
+| Workspace URL 404 / login 400 “Token not valid for this workspace” | Cloud host not provisioned, or login redirected to a different tenant | Sign in at **your** workspace URL only. Do not reuse callback links. |
 | Agent `WRONGPASS` for local Valkey | Password sent to passwordless Valkey | Remove `VALKEY_PASSWORD` env var from agent command |
 | Agent can't reach `localhost` | Docker network isolation | Use `host.docker.internal` not `localhost` for `VALKEY_HOST` |
+| Agent connects but Valkey refused | `VALKEY_PORT` is the container port, not the published host port | Match `VALKEY_PORT` to `REDIS_URL` (6379 or 6380) |
 | `connection refused` on `host.docker.internal` | Linux Docker networking | Replace with `172.17.0.1` on Linux |
 
 ---
@@ -680,6 +738,7 @@ Only 3 changes. Zero code changes in `rag/`.
 
 # Use local Valkey
 REDIS_URL=redis://localhost:6379
+# or REDIS_URL=redis://localhost:6380 with VALKEY_HOST_PORT=6380
 ```
 
 ### Change 2 — Start local Valkey
@@ -702,8 +761,8 @@ docker run -d \
   -e VALKEY_HOST=host.docker.internal \
   -e VALKEY_PORT=6379 \
   -e BETTERDB_CLOUD_URL=wss://<your-workspace>.app.betterdb.com/agent/ws \
-  -e BETTERDB_TOKEN=<new_agent_token> \
-  betterdb/agent:latest
+  -e BETTERDB_TOKEN=<BETTERDB_AGENT_TOKEN> \
+  betterdb/agent:1.4.0
 
 docker logs betterdb-agent-local
 # Expected: [Agent] WebSocket connected, sending hello

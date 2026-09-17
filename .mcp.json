@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "betterdb": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@betterdb/mcp"],
+      "env": {
+        "BETTERDB_URL": "http://localhost:3001"
+      }
+    }
+  }
+}
